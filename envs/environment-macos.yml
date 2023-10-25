@@ -1,0 +1,36 @@
+# Environment with CPU-only packages meant for MacOS
+#  Installs packages needed for the examples
+name: examol
+channels:
+  - defaults
+  - conda-forge
+  - pytorch
+dependencies:
+  - python==3.10.*
+
+  # Basic numeric and data analysis libraries
+  - pandas==1.*
+  - scikit-learn>=1
+  - numpy==1.24.*  # To be compatible with latest TF
+  - matplotlib
+  - pymongo
+
+  # Quantum chemistry (only MOPAC, no xTB)
+  - mopac
+  - rdkit==2023.03.2
+
+  # Use Conda PyTorch to avoid numpy and OpenMP disagreement
+  - pytorch==2.0.*
+  - cpuonly
+
+  # Etc
+  - jupyterlab
+  - pytest
+  - pip
+  - pip:
+    # Temporary: Use a patched version of ASE
+    #  Fixes a bug in Gaussian parsing and has support for new MOPAC
+    - git+https://gitlab.com/wardlt/ase.git@gaussian-opt-fio
+
+    # Need torch for BOTorch
+    - -e ..[botorch,test]
