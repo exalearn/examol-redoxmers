@@ -42,9 +42,9 @@ def scorer():
     return RedoxModelsScorer()
 
 
-@fixture()
-def model_kwargs() -> tuple[str, dict[str, object]]:
-    return 'MPNN', dict(hidden_dim=32, output_dim=1)
+@fixture(params=['MPNN', 'EGNN'])
+def model_kwargs(request) -> tuple[str, dict[str, object]]:
+    return request.param, dict(hidden_dim=32, output_dim=1)
 
 
 def test_convert(training_set, scorer):

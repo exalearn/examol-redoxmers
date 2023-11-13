@@ -8,15 +8,15 @@ import numpy as np
 from future.moves.itertools import zip_longest
 from lightning import pytorch as pl
 from torch_geometric.loader import DataLoader as PyGLoader
-
-from redox_models import RedoxDataModule, RedoxTask
 from sklearn.model_selection import train_test_split
 
 from examol.score.base import Scorer, collect_outputs
 from examol.simulate.initialize import add_initial_conformer
 from examol.store.models import MoleculeRecord
 from examol.store.recipes import PropertyRecipe
-from redox_models.data import RedoxData
+
+from .data import RedoxData, RedoxDataModule
+from .task import RedoxTask
 
 ModelParamType = tuple[str, dict[str, object]]
 ModelObjectType = tuple[ModelParamType, bytes | None]
@@ -79,8 +79,8 @@ class RedoxModelsScorer(Scorer):
         # Make the data loader
         train_data, val_data = train_test_split(list(zip(inputs, outputs)), test_size=validation_size)
         data_module = RedoxDataModule(
-            train_path=train_data,
-            val_path=val_data,
+            train_data=train_data,
+            valid_data=val_data,
             batch_size=batch_size,
         )
 
