@@ -20,6 +20,7 @@ from redox_models.data import RedoxData
 
 ModelParamType = tuple[str, dict[str, object]]
 ModelObjectType = tuple[ModelParamType, bytes | None]
+ModelRecordType = tuple[str, None | list[float]]
 
 
 class RedoxModelsScorer(Scorer):
@@ -48,7 +49,7 @@ class RedoxModelsScorer(Scorer):
     def __init__(self, conformer: tuple[str, int] = ('mmff', 0)):
         self.conformer = conformer
 
-    def transform_inputs(self, record_batch: list[MoleculeRecord], recipes: Sequence[PropertyRecipe] | None = None) -> list[tuple[str, None | list[float]]]:
+    def transform_inputs(self, record_batch: list[MoleculeRecord], recipes: Sequence[PropertyRecipe] | None = None) -> list[ModelRecordType]:
         output = []
         config_name, charge = self.conformer
         for record in record_batch:
@@ -61,18 +62,26 @@ class RedoxModelsScorer(Scorer):
             output.append((conf.xyz, known))
         return output
 
-    def prepare_message(self, model: ModelObjectType, training: bool = True) -> (tuple[str, dict[str, object]] | bytes):
+    def prepare_message(self, model: ModelObjectType, training: bool = True) -> (ModelParamType | bytes):
         if training:
             return model[0]
         else:
             return model[1]
 
-    def retrain(self, model_msg: tuple[str, dict[str, object]], inputs: list, outputs: list, **kwargs) -> bytes:
+    def retrain(self,
+                model_msg: ModelParamType,
+                inputs: list[ModelRecordType],
+                outputs: list[float],
+                max_epochs: int = 2,
+                batch_size: int = 32,
+                learning_rate: float = 1e-3,
+                validation_size: float = 0.1) -> bytes:
         # Make the data loader
-        train_data, val_data = train_test_split(list(zip(inputs, outputs)), test_size=0.1)
+        train_data, val_data = train_test_split(list(zip(inputs, outputs)), test_size=validation_size)
         data_module = RedoxDataModule(
             train_path=train_data,
             val_path=val_data,
+            batch_size=batch_size,
         )
 
         # Run the training in a temporary directory
@@ -81,12 +90,14 @@ class RedoxModelsScorer(Scorer):
             task = RedoxTask(
                 model,
                 kwargs,
-                lr=1e-3,
+                lr=learning_rate,
                 weight_decay=0.0,
             )
             trainer = pl.Trainer(max_epochs=2,
                                  default_root_dir=tmpdir,
-                                 enable_checkpointing=False, enable_progress_bar=False, enable_model_summary=False)  # No print to screen
+                                 enable_checkpointing=False,
+                                 enable_progress_bar=False,
+                                 enable_model_summary=False)  # No print to screen
             trainer.fit(task, datamodule=data_module)
 
             # Return the model as a serialized object
@@ -97,7 +108,7 @@ class RedoxModelsScorer(Scorer):
     def update(self, model: ModelObjectType, update_msg: bytes) -> ModelObjectType:
         return model[0], update_msg
 
-    def score(self, model_msg: bytes, inputs: list, **kwargs) -> np.ndarray:
+    def score(self, model_msg: bytes, inputs: list, batch_size: int = 32) -> np.ndarray:
         # Unpack the model
         model = torch.load(BytesIO(model_msg), map_location='cpu')
 
@@ -111,4 +122,3 @@ class RedoxModelsScorer(Scorer):
         for batch in loader:
             outputs.append(model(batch).detach().cpu().numpy())
         return np.concatenate(outputs, axis=0)
-

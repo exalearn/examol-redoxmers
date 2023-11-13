@@ -72,5 +72,3 @@ def test_flow(training_set, scorer, model_kwargs, recipe):
     model_msg = scorer.prepare_message(model_obj, training=False)
     pred_y = scorer.score(model_msg, inputs)
     assert pred_y.shape == (len(training_set), 1)
-
-
