@@ -44,7 +44,7 @@ class RedoxTask(pl.LightningModule):
                 )
             loss_func = loss_func()
         self.loss_func = loss_func
-        self.save_hyperparameters()
+        self.save_hyperparameters(ignore='loss_func')
 
     def configure_optimizers(self) -> AdamW:
         opt = AdamW(

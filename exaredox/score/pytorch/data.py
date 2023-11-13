@@ -251,36 +251,26 @@ class RedoxDataModule(pl.LightningDataModule):
         super().__init__()
         loader_kwargs.setdefault("batch_size", 16)
         loader_kwargs.setdefault("num_workers", 4)
-        self.datasets = {
-            'train': train_data,
-            'val': valid_data,
-            'test': test_data,
-            'predict': predict_data
-        }
+
+        # Set the hyperparameters
         self.loader_kwargs = loader_kwargs
         self.transforms = transforms
-        self.save_hyperparameters(ignore=['train_path', 'val_path', 'predict_path', 'test_path'])
+
+        # Load the data
+        self.datasets: dict[str, RedoxData] = dict()
+        for name, data in zip(['train', 'val', 'test', 'predict'], [train_data, valid_data, test_data, predict_data]):
+            if data is not None:
+                self.datasets[name] = RedoxData(data, transforms=self.transforms)
+
+        self.save_hyperparameters(ignore=['datasets', 'train_data', 'valid_data', 'test_data', 'predict_data'])
 
     @property
     def persistent_workers(self) -> bool:
         return True if self.loader_kwargs["num_workers"] > 0 else False
 
-    def _make_path(self, stage: str) -> tuple[Path | None, str]:
-        if stage == "validation":
-            key = "val_path"
-        else:
-            key = f"{stage}_path"
-        target = self.hparams.get(key, None)
-        if target:
-            target = Path(target)
-            assert (
-                target.exists()
-            ), f"Path {target} was provided for stage {stage}, but does not exist."
-        return target, key
-
     def _make_dataloader(self, target: str) -> PyGLoader:
         shuffle = True if target == "train" else False
-        dset = getattr(self, f"{target}_dset")
+        dset = self.datasets[target]
         kwargs = {
             "batch_size": self.loader_kwargs.get("batch_size"),
             "num_workers": self.loader_kwargs.get("num_workers"),
@@ -298,16 +288,6 @@ class RedoxDataModule(pl.LightningDataModule):
                     return transform
         return None
 
-    def setup(self, stage: str) -> None:
-        for target in ["train", "val", "test", "predict"]:
-            target_path = self.datasets.get(target, None)
-            if target_path:
-                dset = RedoxData(
-                    target_path,
-                    transforms=self.transforms,
-                )
-                setattr(self, f"{target}_dset", dset)
-
     def train_dataloader(self):
         loader = self._make_dataloader("train")
         return loader
@@ -323,27 +303,3 @@ class RedoxDataModule(pl.LightningDataModule):
     def predict_dataloader(self):
         loader = self._make_dataloader("predict")
         return loader
-
-
-class RedoxPointCloudDataModule(RedoxDataModule):
-    def setup(self, stage: str) -> None:
-        for target in ["train", "val", "test", "predict"]:
-            target_path = self.hparams.get(f"{target}_path", None)
-            if target_path:
-                dset = RedoxPointCloud(
-                    target_path,
-                    transforms=self.transforms,
-                )
-                setattr(self, f"{target}_dset", dset)
-
-    def _make_dataloader(self, target: str) -> NativeLoader:
-        shuffle = True if target == "train" else False
-        dset = getattr(self, f"{target}_dset")
-        kwargs = {
-            "batch_size": self.loader_kwargs.get("batch_size"),
-            "num_workers": self.loader_kwargs.get("num_workers"),
-            "persistent_workers": self.persistent_workers,
-            "shuffle": shuffle,
-            "collate_fn": dset.collate_func,
-        }
-        return NativeLoader(dset, **kwargs)
