@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: MIT License
 
 from argparse import ArgumentParser, Action, Namespace
+from functools import partial
+from multiprocessing import Pool
 from typing import Sequence, Any
 from pathlib import Path
 import gzip
@@ -11,11 +13,11 @@ import numpy as np
 import pandas as pd
 import torch
 from lightning import pytorch as pl
+from lightning.pytorch.loggers import CSVLogger
 from sklearn.model_selection import train_test_split
-from tqdm import tqdm
 
 from examol.store.models import MoleculeRecord, MissingData
-from exaredox.score.pytorch import models
+from exaredox.score.pytorch import models, get_graph_information
 from exaredox.score.pytorch.task import RedoxTask
 from exaredox.score.pytorch.data import RedoxDataModule
 from exaredox.score.pytorch.transforms import MeanScaler
@@ -38,6 +40,17 @@ class ModelKwargParser(Action):
                     value = float(value)
                     value = int(value) if value.is_integer() else value
                 getattr(namespace, self.dest)[key] = value
+
+
+def _parse_line(line, property_name, method_name):
+    """Parse a line from the training set into a form readable by PyTorch"""
+    record: MoleculeRecord = MoleculeRecord.parse_raw(line)
+    try:
+        conf, _ = record.find_lowest_conformer(config_name='mmff', charge=0, solvent=None)
+    except MissingData:
+        return
+    target = record.properties[property_name][method_name]
+    return (get_graph_information(conf.xyz), None), target
 
 
 if __name__ == "__main__":
@@ -130,18 +143,11 @@ if __name__ == "__main__":
     data_path = Path(args.data_path) / f'{args.target_property}-{args.target_method}'
 
     # Load in the training data, using the initial geometry as an input
-    def _read_data(path: Path) -> list[tuple[tuple[str, float | None], float]]:
-        output = []
+    def _read_data(path: Path) -> list[tuple[tuple[dict, float | None], float]]:
         with gzip.open(path, 'rt') as fp:
-            for line in fp:
-                record: MoleculeRecord = MoleculeRecord.parse_raw(line)
-                try:
-                    conf, _ = record.find_lowest_conformer(config_name='mmff', charge=0, solvent=None)
-                except MissingData:
-                    continue
-                target = record.properties[args.target_property][args.target_method]
-                output.append(((conf.xyz, None), target))
-        return output
+            fun = partial(_parse_line, property_name=args.target_property, method_name=args.target_method)
+            with Pool() as pool:
+                return [x for x in pool.imap(fun, fp, chunksize=1024) if x is not None]
 
 
     train_data = _read_data(data_path / 'train.json.gz')
@@ -186,7 +192,8 @@ if __name__ == "__main__":
     )
 
     # instantiate trainer, specifying how training is done
-    trainer = pl.Trainer(max_epochs=args.epochs, fast_dev_run=args.fast_runs, accelerator='gpu')
+    logger = CSVLogger('.')
+    trainer = pl.Trainer(max_epochs=args.epochs, fast_dev_run=args.fast_runs, accelerator='gpu', logger=logger, log_every_n_steps=1000)
 
     # run the training loop
     trainer.fit(task, datamodule=dm)
@@ -198,8 +205,8 @@ if __name__ == "__main__":
 
     # Save run data to disk
     true_y = [x[1] for x in test_data]
-    pd.DataFrame({'true': true_y, 'pred': pred_y}).to_csv(Path(trainer.log_dir) / 'predictions.csv.gz', index=False)
+    pd.DataFrame({'true': true_y, 'pred': pred_y}).to_csv(Path(logger.log_dir) / 'predictions.csv.gz', index=False)
 
-    # Save the argments
-    with open(Path(trainer.log_dir) / 'params.json', 'w') as fp:
+    # Save the arguments
+    with open(Path(logger.log_dir) / 'params.json', 'w') as fp:
         json.dump(args.__dict__, fp)

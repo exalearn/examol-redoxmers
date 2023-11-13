@@ -15,12 +15,12 @@ from examol.simulate.initialize import add_initial_conformer
 from examol.store.models import MoleculeRecord
 from examol.store.recipes import PropertyRecipe
 
-from .data import RedoxData, RedoxDataModule
+from .data import RedoxData, RedoxDataModule, get_graph_information
 from .task import RedoxTask
 
 ModelParamType = tuple[str, dict[str, object]]
 ModelObjectType = tuple[ModelParamType, bytes | None]
-ModelRecordType = tuple[str, None | list[float]]
+ModelRecordType = tuple[dict[str, int | float | np.ndarray], None | list[float]]
 
 
 class RedoxModelsScorer(Scorer):
@@ -59,7 +59,7 @@ class RedoxModelsScorer(Scorer):
 
             # Get the target values
             known = None if recipes is None else collect_outputs([record], recipes).tolist()
-            output.append((conf.xyz, known))
+            output.append((get_graph_information(conf.xyz), known))
         return output
 
     def prepare_message(self, model: ModelObjectType, training: bool = True) -> (ModelParamType | bytes):

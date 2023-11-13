@@ -5,16 +5,14 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from pathlib import Path
-from typing import Any
 from typing import Callable
 
 import torch
+import numpy as np
 from lightning import pytorch as pl
 from rdkit import Chem
 from rdkit.Chem import rdDetermineBonds
 from rdkit.Chem.rdchem import BondType
-from torch.utils.data import DataLoader as NativeLoader
 from torch.utils.data import Dataset
 from torch_geometric.data import Data
 from torch_geometric.data.collate import collate
@@ -22,20 +20,20 @@ from torch_geometric.loader import DataLoader as PyGLoader
 
 from .transforms import MeanScaler
 
-__all__ = ["Molecule", "RedoxData", "RedoxDataModule", "compute_edges"]
+__all__ = ["Molecule", "RedoxData", "RedoxDataModule", "get_graph_information"]
 
-RecordType = tuple[str, float | list[float] | None]  # XYZ mapped to one or more flats
+RecordType = tuple[dict[str, int | str | np.ndarray], float | list[float] | None]  # Graph data mapped to one or more floats
 
 pt = Chem.GetPeriodicTable()
 
 bond_names = sorted(filter(lambda x: x.isupper(), dir(BondType)))
-# The bond mapping offets by 1 to facilitate embedding padding
+# The bond mapping offsets by 1 to facilitate embedding padding
 bond_mapping = {
     getattr(BondType, name): index + 1 for index, name in enumerate(bond_names)
 }
 
 
-def get_graph_information(xyz) -> dict[str, Any]:
+def get_graph_information(xyz) -> dict[str, int | str | np.ndarray]:
     """Convert an XYZ file to a PyG-compatible dictionary
 
     Args:
@@ -58,18 +56,18 @@ def get_graph_information(xyz) -> dict[str, Any]:
         src = bond.GetBeginAtomIdx()
         dst = bond.GetEndAtomIdx()
         edge_index.append([src, dst])
+
     # get atom types
     atom_numbers = [atom.GetAtomicNum() for atom in mol.GetAtoms()]
-    coords = torch.from_numpy(mol.GetConformer(0).GetPositions()).float()
-    return_dict = {
-        "atoms": torch.LongTensor(atom_numbers),
-        "edge_index": torch.LongTensor(edge_index).T.contiguous(),
-        "bonds": torch.LongTensor(bonds),
+    coords = mol.GetConformer(0).GetPositions().astype(np.float32)
+    return {
+        "atoms": np.array(atom_numbers, dtype=np.int64),
+        "edge_index": np.array(edge_index, dtype=np.int64).T,
+        "bonds": np.array(bonds, dtype=np.int64),
         "coords": coords,
         "num_nodes": len(atom_numbers),
         "smi": Chem.MolToSmiles(mol, canonical=True),
     }
-    return return_dict
 
 
 def parse_xyz(coordinates: str) -> tuple[torch.Tensor, torch.Tensor]:
@@ -129,26 +127,44 @@ class Molecule(Data):
     ) -> None:
         super().__init__(
             atoms=atoms,
+            bonds=bonds,
+            edge_index=edge_index,
             coords=coords,
             target=target,
-            edge_index=edge_index,
-            bonds=bonds,
             num_nodes=num_nodes,
             smi=smi,
         )
 
     @classmethod
-    def from_xyz_and_target(cls, xyz: str, target_property: float | Iterable[float]):
+    def from_xyz_and_target(cls, xyz: str, target: float | Iterable[float]):
         """Create the Molecule record from XYZ and property
 
         Args:
             xyz: XYZ structure to process
-            target_property: Target value to predict
+            target: Target value to predict
         Returns:
             Initialized record, ready to train
         """
         graph_data = get_graph_information(xyz)
-        return cls(target=target_property, **graph_data)
+        return cls.from_graph_data(graph_data, target)
+
+    @classmethod
+    def from_graph_data(cls, graph_data: dict[str, float | int | np.ndarray], target: float | Iterable[float]):
+        """Create the Molecule record from pre-parsed graph data
+
+        Args:
+            graph_data: Data about the molecule graph
+            target: Target value to predict
+        Returns:
+            Initialized record as a PyTorch object
+        """
+        as_torch = {}
+        for t in ['atoms', 'bonds', 'edge_index', 'coords']:  # Things to convert to Torch now
+            as_torch[t] = torch.from_numpy(graph_data[t])
+        for t in ['num_nodes', 'smi']:
+            as_torch[t] = graph_data[t]
+
+        return cls(target=target, **as_torch)
 
 
 class RedoxData(Dataset):
@@ -160,7 +176,7 @@ class RedoxData(Dataset):
     ) -> None:
         super().__init__()
         # Store a copy of the data
-        self._data = [Molecule.from_xyz_and_target(xyz, target) for (xyz, _), target in data]
+        self._data = [Molecule.from_graph_data(info, target) for (info, _), target in data]
 
         # Store any transformations
         self.precomputed = precomputed
@@ -191,51 +207,6 @@ class RedoxData(Dataset):
     def collate_func(batch: list[Molecule]) -> Molecule:
         out, _, _ = collate(Molecule, batch)
         return out
-
-
-class RedoxPointCloud(RedoxData):
-    def __getitem__(self, index: int) -> dict[str, torch.Tensor | str]:
-        graph = super().__getitem__(index)
-        # unpack into a point cloud now
-        data = {
-            "coords": graph.coords,
-            "atoms": graph.atoms,
-            "smiles": graph.smi,
-            "target": graph.target,
-        }
-        return data
-
-    @staticmethod
-    def collate_func(
-            batch: list[dict[str, Any]],
-    ) -> dict[str, torch.Tensor | list[str]]:
-        batch_size = len(batch)
-        max_atoms = 0
-        for entry in batch:
-            atom_count = len(entry["atoms"])
-            if atom_count > max_atoms:
-                max_atoms = atom_count
-        padded_atoms = torch.zeros((batch_size, max_atoms), dtype=torch.long)
-        padded_coords = torch.zeros((batch_size, max_atoms, 3))
-        mask = torch.zeros_like(padded_atoms).bool()
-        target = torch.zeros((batch_size,))
-        smiles = []
-        for index, entry in enumerate(batch):
-            atoms = entry["atoms"]
-            atom_count = len(atoms)
-            padded_atoms[index, :atom_count] = atoms
-            padded_coords[index, :atom_count, :] = entry["coords"]
-            mask[index, :atom_count] = True
-            smiles.append(entry["smiles"])
-            target[index] = entry["target"]
-        packed_data = {
-            "atoms": padded_atoms,
-            "coords": padded_coords,
-            "mask": mask,
-            "smiles": smiles,
-            "target": target,
-        }
-        return packed_data
 
 
 class RedoxDataModule(pl.LightningDataModule):
