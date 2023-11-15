@@ -17,6 +17,7 @@ from examol.store.recipes import PropertyRecipe
 
 from .data import RedoxData, RedoxDataModule, get_graph_information
 from .task import RedoxTask
+from .transforms import MeanScaler
 
 ModelParamType = tuple[str, dict[str, object]]
 ModelObjectType = tuple[ModelParamType, bytes | None]
@@ -76,12 +77,19 @@ class RedoxModelsScorer(Scorer):
                 batch_size: int = 32,
                 learning_rate: float = 1e-3,
                 validation_size: float = 0.1) -> bytes:
+
+        # Determine the scaling transform
+        mean_y = float(np.mean(outputs))
+        std_y = float(np.std(outputs))
+        transform = MeanScaler(mean=mean_y, var=std_y)
+
         # Make the data loader
         train_data, val_data = train_test_split(list(zip(inputs, outputs)), test_size=validation_size)
         data_module = RedoxDataModule(
             train_data=train_data,
             valid_data=val_data,
             batch_size=batch_size,
+            transforms=[transform]
         )
 
         # Run the training in a temporary directory
@@ -93,7 +101,7 @@ class RedoxModelsScorer(Scorer):
                 lr=learning_rate,
                 weight_decay=0.0,
             )
-            trainer = pl.Trainer(max_epochs=2,
+            trainer = pl.Trainer(max_epochs=max_epochs,
                                  default_root_dir=tmpdir,
                                  enable_checkpointing=False,
                                  enable_progress_bar=False,
@@ -102,7 +110,7 @@ class RedoxModelsScorer(Scorer):
 
             # Return the model as a serialized object
             fp = BytesIO()
-            torch.save(task.encoder, fp)
+            torch.save([task.encoder, transform], fp)
             return fp.getvalue()
 
     def update(self, model: ModelObjectType, update_msg: bytes) -> ModelObjectType:
@@ -110,7 +118,7 @@ class RedoxModelsScorer(Scorer):
 
     def score(self, model_msg: bytes, inputs: list, batch_size: int = 32) -> np.ndarray:
         # Unpack the model
-        model = torch.load(BytesIO(model_msg), map_location='cpu')
+        model, transform = torch.load(BytesIO(model_msg), map_location='cpu')
 
         # Make the data loader
         with_targets = zip_longest(inputs, '', fillvalue=None)
@@ -120,5 +128,6 @@ class RedoxModelsScorer(Scorer):
         # Run over all data
         outputs = []
         for batch in loader:
-            outputs.append(model(batch).detach().cpu().numpy())
+            pred_y_unscaled = model(batch).detach().cpu().numpy()
+            outputs.append(transform.inverse_transform(pred_y_unscaled))
         return np.concatenate(outputs, axis=0)
