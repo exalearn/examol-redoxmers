@@ -1,30 +1,30 @@
 """Interfaces to models produced by @laserkelvin"""
 from io import BytesIO
 from tempfile import TemporaryDirectory
-from typing import Sequence
 
 import torch
 import numpy as np
 from future.moves.itertools import zip_longest
 from lightning import pytorch as pl
+from torch.nn import MSELoss
 from torch_geometric.loader import DataLoader as PyGLoader
 from sklearn.model_selection import train_test_split
 
-from examol.score.base import Scorer, collect_outputs
+from examol.score.base import MultiFidelityScorer
+from examol.score.utils.multifi import compute_deltas
 from examol.simulate.initialize import add_initial_conformer
 from examol.store.models import MoleculeRecord
-from examol.store.recipes import PropertyRecipe
 
 from .data import RedoxData, RedoxDataModule, get_graph_information
 from .task import RedoxTask
-from .transforms import MeanScaler
+from .utils import MaskedMSELoss, MeanScaler
 
 ModelParamType = tuple[str, dict[str, object]]
 ModelObjectType = tuple[ModelParamType, bytes | None]
-ModelRecordType = tuple[dict[str, int | float | np.ndarray], None | list[float]]
+ModelRecordType = dict[str, int | float | np.ndarray]
 
 
-class RedoxModelsScorer(Scorer):
+class RedoxModelsScorer(MultiFidelityScorer):
     """Wrapper for Kelvin's RedoxModels.
 
     Users provide a list of models as model architecture name (e.g., MPNN) a set of hyperparameters paired with, optionally, an initial set of weights.
@@ -50,7 +50,7 @@ class RedoxModelsScorer(Scorer):
     def __init__(self, conformer: tuple[str, int] = ('mmff', 0)):
         self.conformer = conformer
 
-    def transform_inputs(self, record_batch: list[MoleculeRecord], recipes: Sequence[PropertyRecipe] | None = None) -> list[ModelRecordType]:
+    def transform_inputs(self, record_batch: list[MoleculeRecord]) -> list[ModelRecordType]:
         output = []
         config_name, charge = self.conformer
         for record in record_batch:
@@ -59,8 +59,7 @@ class RedoxModelsScorer(Scorer):
             conf, _ = record.find_lowest_conformer(config_name, charge, solvent=None, optimized_only=True)
 
             # Get the target values
-            known = None if recipes is None else collect_outputs([record], recipes).tolist()
-            output.append((get_graph_information(conf.xyz), known))
+            output.append(get_graph_information(conf.xyz))
         return output
 
     def prepare_message(self, model: ModelObjectType, training: bool = True) -> (ModelParamType | bytes):
@@ -73,14 +72,25 @@ class RedoxModelsScorer(Scorer):
                 model_msg: ModelParamType,
                 inputs: list[ModelRecordType],
                 outputs: list[float],
+                lower_fidelities: np.ndarray | None = None,
                 max_epochs: int = 2,
                 batch_size: int = 32,
                 learning_rate: float = 1e-3,
                 validation_size: float = 0.1) -> bytes:
 
+        # Compute deltas if lower_fidelities are provided
+        if lower_fidelities is not None:
+            all_fidelities = np.concatenate([lower_fidelities, np.array(outputs)[:, None]], axis=1)
+            outputs = compute_deltas(all_fidelities)
+            loss_func = MaskedMSELoss()
+        else:
+            outputs = np.array(outputs)
+            loss_func = MSELoss()
+        outputs = torch.from_numpy(outputs).float()
+
         # Determine the scaling transform
-        mean_y = float(np.mean(outputs))
-        std_y = float(np.std(outputs))
+        mean_y = torch.mean(outputs)
+        std_y = torch.std(outputs)
         transform = MeanScaler(mean=mean_y, var=std_y)
 
         # Make the data loader
@@ -100,6 +110,7 @@ class RedoxModelsScorer(Scorer):
                 kwargs,
                 lr=learning_rate,
                 weight_decay=0.0,
+                loss_func=loss_func
             )
             trainer = pl.Trainer(max_epochs=max_epochs,
                                  default_root_dir=tmpdir,
@@ -128,6 +139,7 @@ class RedoxModelsScorer(Scorer):
         # Run over all data
         outputs = []
         for batch in loader:
-            pred_y_unscaled = model(batch).detach().cpu().numpy()
-            outputs.append(transform.inverse_transform(pred_y_unscaled))
+            pred_y_unscaled = model(batch)
+            pred_y = transform.inverse_transform(pred_y_unscaled)
+            outputs.append(pred_y.detach().cpu().numpy())
         return np.concatenate(outputs, axis=0)

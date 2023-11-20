@@ -18,11 +18,11 @@ from torch_geometric.data import Data
 from torch_geometric.data.collate import collate
 from torch_geometric.loader import DataLoader as PyGLoader
 
-from .transforms import MeanScaler
+from .utils import MeanScaler
 
 __all__ = ["Molecule", "RedoxData", "RedoxDataModule", "get_graph_information"]
 
-RecordType = tuple[dict[str, int | str | np.ndarray], float | list[float] | None]  # Graph data mapped to one or more floats
+RecordType = dict[str, int | str | np.ndarray]  # Graph data mapped to one or more floats
 
 pt = Chem.GetPeriodicTable()
 
@@ -176,7 +176,7 @@ class RedoxData(Dataset):
     ) -> None:
         super().__init__()
         # Store a copy of the data
-        self._data = [Molecule.from_graph_data(info, target) for (info, _), target in data]
+        self._data = [Molecule.from_graph_data(info, target) for info, target in data]
 
         # Store any transformations
         self.precomputed = precomputed

@@ -49,7 +49,7 @@ def model_kwargs(request) -> tuple[str, dict[str, object]]:
 
 def test_convert(training_set, scorer):
     converted = scorer.transform_inputs(training_set)
-    assert converted[0][0]['num_nodes'] == 5
+    assert converted[0]['num_nodes'] == 5
 
 
 def test_flow(training_set, scorer, model_kwargs, recipe):

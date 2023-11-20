@@ -17,7 +17,7 @@ class MeanScaler:
     values.
     """
 
-    def __init__(self, mean: float, var: float, epsilon: float = 1e-7) -> None:
+    def __init__(self, mean: torch.Tensor, var: torch.Tensor, epsilon: float = 1e-7) -> None:
         self.mean = mean
         self.var = var
         self.epsilon = epsilon
@@ -30,3 +30,13 @@ class MeanScaler:
 
     def inverse_transform(self, predictions: torch.Tensor) -> torch.Tensor:
         return (predictions * self.var) + self.mean
+
+
+class MaskedMSELoss(torch.nn.Module):
+    """Compute the mean squared loss on non-NaN entries"""
+
+    def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        diff = torch.pow(input - target, 2)
+        return torch.sum(
+            torch.where(torch.isnan(diff), 0, diff)
+        )
