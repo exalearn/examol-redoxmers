@@ -2,8 +2,9 @@
 
 Using a conftest copied from the main repo for now
 """
-from pytest import fixture
+from pytest import fixture, mark
 
+from examol.score.utils.multifi import collect_outputs
 from examol.store.models import MoleculeRecord
 from examol.store.recipes import PropertyRecipe
 from exaredox.score.pytorch import RedoxModelsScorer
@@ -44,7 +45,7 @@ def scorer():
 
 @fixture(params=['MPNN', 'EGNN'])
 def model_kwargs(request) -> tuple[str, dict[str, object]]:
-    return request.param, dict(hidden_dim=32, output_dim=1)
+    return request.param, dict(hidden_dim=32)
 
 
 def test_convert(training_set, scorer):
@@ -52,17 +53,21 @@ def test_convert(training_set, scorer):
     assert converted[0]['num_nodes'] == 5
 
 
-def test_flow(training_set, scorer, model_kwargs, recipe):
+@mark.parametrize('multifi', [False, True])
+def test_flow(training_set, scorer, model_kwargs, multifi_recipes, multifi):
     # Make the model updates
     model_obj = (model_kwargs, None)
 
     # Prepare messages
     model_msg = scorer.prepare_message(model_obj, training=True)
     inputs = scorer.transform_inputs(training_set)
-    outputs = scorer.transform_outputs(training_set, recipe)
+    outputs = scorer.transform_outputs(training_set, multifi_recipes[-1])
+    lower_fidelities = None
+    if multifi:
+        lower_fidelities = collect_outputs(training_set, multifi_recipes[:-1])
 
     # Run the training
-    update_msg = scorer.retrain(model_msg, inputs, outputs.tolist())
+    update_msg = scorer.retrain(model_msg, inputs, outputs.tolist(), lower_fidelities=lower_fidelities)
 
     # Run the update
     model_obj = scorer.update(model_obj, update_msg)
@@ -70,5 +75,5 @@ def test_flow(training_set, scorer, model_kwargs, recipe):
 
     # Run inference
     model_msg = scorer.prepare_message(model_obj, training=False)
-    pred_y = scorer.score(model_msg, inputs)
-    assert pred_y.shape == (len(training_set), 1)
+    pred_y = scorer.score(model_msg, inputs, lower_fidelities=lower_fidelities)
+    assert pred_y.shape == (len(training_set),)

@@ -105,6 +105,7 @@ class RedoxModelsScorer(MultiFidelityScorer):
         # Run the training in a temporary directory
         with TemporaryDirectory() as tmpdir:
             model, kwargs = model_msg
+            kwargs['output_dim'] = 1 if lower_fidelities is None else outputs.shape[1]
             task = RedoxTask(
                 model,
                 kwargs,
@@ -127,7 +128,7 @@ class RedoxModelsScorer(MultiFidelityScorer):
     def update(self, model: ModelObjectType, update_msg: bytes) -> ModelObjectType:
         return model[0], update_msg
 
-    def score(self, model_msg: bytes, inputs: list, batch_size: int = 32) -> np.ndarray:
+    def score(self, model_msg: bytes, inputs: list, lower_fidelities: np.ndarray | None = None, batch_size: int = 32) -> np.ndarray:
         # Unpack the model
         model, transform = torch.load(BytesIO(model_msg), map_location='cpu')
 
@@ -142,4 +143,12 @@ class RedoxModelsScorer(MultiFidelityScorer):
             pred_y_unscaled = model(batch)
             pred_y = transform.inverse_transform(pred_y_unscaled)
             outputs.append(pred_y.detach().cpu().numpy())
-        return np.concatenate(outputs, axis=0)
+        outputs = np.squeeze(np.concatenate(outputs, axis=0))
+
+        # If needed, compute the delta
+        if outputs.ndim == 1:
+            return outputs
+
+        is_known = np.isfinite(lower_fidelities)
+        outputs[:, :-1] = np.where(is_known, lower_fidelities, outputs[:, :-1])
+        return outputs.sum(axis=1)

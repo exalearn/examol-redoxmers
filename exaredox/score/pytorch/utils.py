@@ -36,6 +36,7 @@ class MaskedMSELoss(torch.nn.Module):
     """Compute the mean squared loss on non-NaN entries"""
 
     def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        input = input.flatten()
         diff = torch.pow(input - target, 2)
         return torch.sum(
             torch.where(torch.isnan(diff), 0, diff)
