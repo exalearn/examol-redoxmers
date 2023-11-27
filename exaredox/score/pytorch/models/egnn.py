@@ -32,8 +32,8 @@ class EGNNConv(MessagePassing):
     def __init__(
             self,
             node_dim: int,
-            hidden_dim: int,
-            out_dim: int,
+            hidden_dim: int = 64,
+            out_dim: int = 1,
             coord_dim: int | None = None,
             edge_dim: int | None = None,
             activation: str = "SiLU",
@@ -150,8 +150,8 @@ class EGNNConv(MessagePassing):
 class EGNN(EncoderWithCoords):
     def __init__(
             self,
-            hidden_dim: int,
-            output_dim: int,
+            hidden_dim: int = 64,
+            output_dim: int = 1,
             num_conv: int = 3,
             num_atom_types: int = 100,
             num_edge_types: int = 30,
@@ -180,6 +180,8 @@ class EGNN(EncoderWithCoords):
                 for _ in range(num_conv)
             ],
         )
+
+        # TODO (wardlt): Add some output layers here
         self.output = nn.Linear(hidden_dim, output_dim, bias=False)
 
     def _forward(self, batch: Molecule) -> torch.Tensor:
@@ -197,5 +199,7 @@ class EGNN(EncoderWithCoords):
         for layer in self.conv_layers:
             atom_feats, coords = layer(atom_feats, coords, edge_feats, edge_index)
         # use size-extensive pooling
+
+        # TODO (wardlt): Make choice of pooling function an option (e.g., mean, max, sum), location before or after reduction
         pooled_data = global_add_pool(atom_feats, node_batch_idx)
         return self.output(pooled_data)

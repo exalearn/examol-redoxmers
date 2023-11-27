@@ -3,6 +3,7 @@
 
 """Data transformation"""
 import torch
+from torch.nn.functional import mse_loss
 from torch_geometric.data import Data
 
 __all__ = ["MeanScaler"]
@@ -36,8 +37,9 @@ class MaskedMSELoss(torch.nn.Module):
     """Compute the mean squared loss on non-NaN entries"""
 
     def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        input = input.flatten()
-        diff = torch.pow(input - target, 2)
-        return torch.sum(
-            torch.where(torch.isnan(diff), 0, diff)
-        )
+        # Get only the non-NaN entries
+        mask = torch.isfinite(target)
+        input = input.flatten()[mask]
+        target = target[mask]
+
+        return mse_loss(input, target)

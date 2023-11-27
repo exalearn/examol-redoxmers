@@ -6,6 +6,7 @@ import torch
 import numpy as np
 from future.moves.itertools import zip_longest
 from lightning import pytorch as pl
+from lightning.pytorch.callbacks import EarlyStopping
 from torch.nn import MSELoss
 from torch_geometric.loader import DataLoader as PyGLoader
 from sklearn.model_selection import train_test_split
@@ -45,8 +46,6 @@ class RedoxModelsScorer(MultiFidelityScorer):
             Default is to use MMFF energies for neutral geometries.
     """
 
-    _supports_multi_fidelity = True
-
     def __init__(self, conformer: tuple[str, int] = ('mmff', 0)):
         self.conformer = conformer
 
@@ -56,7 +55,7 @@ class RedoxModelsScorer(MultiFidelityScorer):
         for record in record_batch:
             # Get the molecule
             add_initial_conformer(record)  # In case it has not been done yet
-            conf, _ = record.find_lowest_conformer(config_name, charge, solvent=None, optimized_only=True)
+            conf, _ = record.find_lowest_conformer(config_name, charge, solvent=None, optimized_only=False)
 
             # Get the target values
             output.append(get_graph_information(conf.xyz))
@@ -71,12 +70,15 @@ class RedoxModelsScorer(MultiFidelityScorer):
     def retrain(self,
                 model_msg: ModelParamType,
                 inputs: list[ModelRecordType],
-                outputs: list[float],
+                outputs: list[float] | np.ndarray,
                 lower_fidelities: np.ndarray | None = None,
                 max_epochs: int = 2,
+                patience: int | None = None,
                 batch_size: int = 32,
                 learning_rate: float = 1e-3,
-                validation_size: float = 0.1) -> bytes:
+                validation_size: float = 0.1,
+                num_workers: int = 4,
+                verbose: bool = False) -> bytes:
 
         # Compute deltas if lower_fidelities are provided
         if lower_fidelities is not None:
@@ -84,14 +86,19 @@ class RedoxModelsScorer(MultiFidelityScorer):
             outputs = compute_deltas(all_fidelities)
             loss_func = MaskedMSELoss()
         else:
-            outputs = np.array(outputs)
+            outputs = np.array(outputs)[:, None]
             loss_func = MSELoss()
-        outputs = torch.from_numpy(outputs).float()
 
         # Determine the scaling transform
-        mean_y = torch.mean(outputs)
-        std_y = torch.std(outputs)
+        mean_y = torch.from_numpy(np.nanmean(outputs, axis=0)).float()
+        std_y = torch.from_numpy(np.nanstd(outputs, axis=0)).float()
         transform = MeanScaler(mean=mean_y, var=std_y)
+        outputs = torch.from_numpy(outputs).float()
+
+        # Prepare for early stopping
+        if patience is None:
+            patience = max(1, max_epochs // 8)
+        early_stop = EarlyStopping('val_loss', patience=patience, verbose=verbose)
 
         # Make the data loader
         train_data, val_data = train_test_split(list(zip(inputs, outputs)), test_size=validation_size)
@@ -99,7 +106,8 @@ class RedoxModelsScorer(MultiFidelityScorer):
             train_data=train_data,
             valid_data=val_data,
             batch_size=batch_size,
-            transforms=[transform]
+            transforms=[transform],
+            num_workers=num_workers,
         )
 
         # Run the training in a temporary directory
@@ -116,8 +124,10 @@ class RedoxModelsScorer(MultiFidelityScorer):
             trainer = pl.Trainer(max_epochs=max_epochs,
                                  default_root_dir=tmpdir,
                                  enable_checkpointing=False,
-                                 enable_progress_bar=False,
-                                 enable_model_summary=False)  # No print to screen
+                                 enable_progress_bar=verbose,
+                                 enable_model_summary=verbose,
+                                 accelerator="auto",
+                                 callbacks=[early_stop])
             trainer.fit(task, datamodule=data_module)
 
             # Return the model as a serialized object
@@ -138,11 +148,13 @@ class RedoxModelsScorer(MultiFidelityScorer):
         loader = PyGLoader(data_module)
 
         # Run over all data
-        outputs = []
-        for batch in loader:
-            pred_y_unscaled = model(batch)
-            pred_y = transform.inverse_transform(pred_y_unscaled)
-            outputs.append(pred_y.detach().cpu().numpy())
+        #  TODO (wardlt): Run on GPU
+        with torch.no_grad():
+            outputs = []
+            for batch in loader:
+                pred_y_unscaled = model(batch)
+                pred_y = transform.inverse_transform(pred_y_unscaled)
+                outputs.append(pred_y.detach().cpu().numpy())
         outputs = np.squeeze(np.concatenate(outputs, axis=0))
 
         # If needed, compute the delta

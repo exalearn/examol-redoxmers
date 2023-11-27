@@ -2,6 +2,7 @@
 
 Using a conftest copied from the main repo for now
 """
+import numpy as np
 from pytest import fixture, mark
 
 from examol.score.utils.multifi import collect_outputs
@@ -55,6 +56,11 @@ def test_convert(training_set, scorer):
 
 @mark.parametrize('multifi', [False, True])
 def test_flow(training_set, scorer, model_kwargs, multifi_recipes, multifi):
+    # Remove the top property and middle property from one of the entries
+    if multifi:
+        training_set[0].properties[multifi_recipes[0].name].pop(multifi_recipes[-1].level)
+        training_set[0].properties[multifi_recipes[0].name].pop(multifi_recipes[-2].level)
+
     # Make the model updates
     model_obj = (model_kwargs, None)
 
@@ -76,4 +82,5 @@ def test_flow(training_set, scorer, model_kwargs, multifi_recipes, multifi):
     # Run inference
     model_msg = scorer.prepare_message(model_obj, training=False)
     pred_y = scorer.score(model_msg, inputs, lower_fidelities=lower_fidelities)
+    assert np.isfinite(pred_y).all()
     assert pred_y.shape == (len(training_set),)
