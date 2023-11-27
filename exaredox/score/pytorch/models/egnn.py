@@ -6,7 +6,7 @@ from einops import reduce
 from torch import nn
 from torch_geometric.nn import LayerNorm
 from torch_geometric.nn import MessagePassing
-from torch_geometric.nn.pool import global_add_pool
+from torch_geometric.nn import pool
 from torch_geometric.typing import Size
 
 from ..data import Molecule
@@ -144,10 +144,24 @@ class EGNNConv(MessagePassing):
             rel_coords=rel_coords,
             edge_attr=combined_edge_feats,
         )
-        return (new_nodes, new_coords)
+        return new_nodes, new_coords
 
 
 class EGNN(EncoderWithCoords):
+    """EGNN
+
+    Args:
+        hidden_dim: Number of features to describe each node and edge
+        output_dim: Number of outputs to produce
+        num_conv: Number of message passing layers
+        num_atom_types: Maximum number of types of nodes to expect (0 is a mask)
+        num_edge_types: Maximum number of types of edges expect (0 is a mask)
+        activation: Activation function to use in message passing teps
+        pool_operation: Name of the pool operation to use (ex: "add" for "global_add_pool")
+        num_output_layers: Number of output layers
+        pool_before_output: Whether to pool before or after applying the output layers
+    """
+
     def __init__(
             self,
             hidden_dim: int = 64,
@@ -156,6 +170,9 @@ class EGNN(EncoderWithCoords):
             num_atom_types: int = 100,
             num_edge_types: int = 30,
             activation: str = "SiLU",
+            pool_operation: str = 'add',
+            num_output_layers: int = 0,
+            pool_before_output: bool = True,
             **kwargs,
     ) -> None:
         super().__init__()
@@ -181,8 +198,14 @@ class EGNN(EncoderWithCoords):
             ],
         )
 
-        # TODO (wardlt): Add some output layers here
-        self.output = nn.Linear(hidden_dim, output_dim, bias=False)
+        # Settings that morph atom-level features into
+        self.pool_operation = getattr(pool, f'global_{pool_operation}_pool')
+        self.pool_before_output = pool_before_output
+        self.output_mlp = None
+        if num_output_layers > 0:
+            self.output_mlp = make_mlp(hidden_dim, hidden_dim, output_dim, activation="ReLU", num_layers=num_output_layers)
+        else:
+            self.output_mlp = nn.Linear(hidden_dim, output_dim, bias=False)
 
     def _forward(self, batch: Molecule) -> torch.Tensor:
         super()._forward(batch)
@@ -198,8 +221,11 @@ class EGNN(EncoderWithCoords):
         # loop over each graph layer
         for layer in self.conv_layers:
             atom_feats, coords = layer(atom_feats, coords, edge_feats, edge_index)
-        # use size-extensive pooling
 
-        # TODO (wardlt): Make choice of pooling function an option (e.g., mean, max, sum), location before or after reduction
-        pooled_data = global_add_pool(atom_feats, node_batch_idx)
-        return self.output(pooled_data)
+        # Condense from atom features to one output per graph
+        if self.pool_before_output:
+            pooled_data = self.pool_operation(atom_feats, node_batch_idx)
+            return self.output_mlp(pooled_data)
+        else:
+            output_per_node = self.output_mlp(atom_feats)
+            return self.pool_operation(output_per_node, node_batch_idx)
