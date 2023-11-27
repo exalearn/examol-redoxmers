@@ -163,7 +163,7 @@ class RedoxModelsScorer(MultiFidelityScorer):
             outputs = []
             for batch in loader:
                 batch = batch.to(device)
-                pred_y_unscaled = model(batch)
+                pred_y_unscaled = model(batch).cpu()
                 pred_y = transform.inverse_transform(pred_y_unscaled)
                 outputs.append(pred_y.detach().cpu().numpy())
         outputs = np.squeeze(np.concatenate(outputs, axis=0))
@@ -172,6 +172,7 @@ class RedoxModelsScorer(MultiFidelityScorer):
         if outputs.ndim == 1:
             return outputs
 
-        is_known = np.isfinite(lower_fidelities)
-        outputs[:, :-1] = np.where(is_known, lower_fidelities, outputs[:, :-1])
+        known_deltas = compute_deltas(lower_fidelities)
+        is_known = np.isfinite(known_deltas)
+        outputs[:, :-1] = np.where(is_known, known_deltas, outputs[:, :-1])
         return outputs.sum(axis=1)
