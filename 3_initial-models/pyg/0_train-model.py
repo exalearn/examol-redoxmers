@@ -2,25 +2,22 @@
 # SPDX-License-Identifier: MIT License
 
 from argparse import ArgumentParser, Action, Namespace
-from functools import partial
-from multiprocessing import Pool
 from typing import Sequence, Any
 from pathlib import Path
+from hashlib import md5
 import gzip
 import json
 
 import numpy as np
 import pandas as pd
-import torch
+from tqdm import tqdm
 from lightning import pytorch as pl
-from lightning.pytorch.loggers import CSVLogger
-from sklearn.model_selection import train_test_split
+from sklearn import metrics
 
-from examol.store.models import MoleculeRecord, MissingData
-from exaredox.score.pytorch import models, get_graph_information
-from exaredox.score.pytorch.task import RedoxTask
-from exaredox.score.pytorch.data import RedoxDataModule
-from exaredox.score.pytorch.transforms import MeanScaler
+from examol.score.utils.multifi import collect_outputs
+from examol.store.models import MoleculeRecord
+from examol.store.recipes import RedoxEnergy
+from exaredox.score.pytorch import RedoxModelsScorer
 
 
 class ModelKwargParser(Action):
@@ -40,17 +37,6 @@ class ModelKwargParser(Action):
                     value = float(value)
                     value = int(value) if value.is_integer() else value
                 getattr(namespace, self.dest)[key] = value
-
-
-def _parse_line(line, property_name, method_name):
-    """Parse a line from the training set into a form readable by PyTorch"""
-    record: MoleculeRecord = MoleculeRecord.parse_raw(line)
-    try:
-        conf, _ = record.find_lowest_conformer(config_name='mmff', charge=0, solvent=None)
-    except MissingData:
-        return
-    target = record.properties[property_name][method_name]
-    return (get_graph_information(conf.xyz), None), target
 
 
 if __name__ == "__main__":
@@ -85,7 +71,7 @@ if __name__ == "__main__":
         default=0.0,
         help="Weight decay regularization passed into the AdamW optimizer.",
     )
-    parser.add_argument("-k", "--model-kwargs", nargs="*", action=ModelKwargParser)
+    parser.add_argument("-k", "--model-kwargs", nargs="*", action=ModelKwargParser, default={})
     parser.add_argument(
         "-n",
         "--num-loaders",
@@ -105,7 +91,7 @@ if __name__ == "__main__":
         "--model",
         type=str,
         default="EGNN",
-        help="Class name of model, retrieved from `redox_models.models`.",
+        help="Class name of model, retrieved from `exaredox.score.pytorch`",
     )
     parser.add_argument(
         "-e",
@@ -136,77 +122,95 @@ if __name__ == "__main__":
         default="xtb-vertical",
         help="Name of the method used to calculate target labels.",
     )
+    parser.add_argument(
+        "--lower-levels",
+        type=str,
+        nargs='*',
+        help="Lower levels of fidelity used to enhance training",
+    )
 
     args = parser.parse_args()
 
-    # Determine the path to data directory from the data path, target method and property
-    data_path = Path(args.data_path) / f'{args.target_property}-{args.target_method}'
+    # Assemble the recipes and lower-fidelity data
+    top_recipe = RedoxEnergy.from_name(args.target_property, args.target_method)
+    all_recipes: list[RedoxEnergy] = [
+                                         RedoxEnergy.from_name(top_recipe.name, level) for level in args.lower_levels or []
+                                     ] + [top_recipe]
+    print(f'Learning {top_recipe.name} at levels: {", ".join(x.level for x in all_recipes)}')
 
     # Load in the training data, using the initial geometry as an input
-    def _read_data(path: Path) -> list[tuple[tuple[dict, float | None], float]]:
+    # Determine the path to data directory from the data path, and lowest-level method and property
+    lowest_recipe = all_recipes[0]
+    data_path = Path(args.data_path) / f'{lowest_recipe.name}-{lowest_recipe.level}'
+
+    def _read_data(path: Path) -> list[MoleculeRecord]:
         with gzip.open(path, 'rt') as fp:
-            fun = partial(_parse_line, property_name=args.target_property, method_name=args.target_method)
-            with Pool() as pool:
-                return [x for x in pool.imap(fun, fp, chunksize=1024) if x is not None]
+            return [MoleculeRecord.parse_raw(l) for l in tqdm(fp, desc=path.name)]
 
 
     train_data = _read_data(data_path / 'train.json.gz')
     test_data = _read_data(data_path / 'test.json.gz')
+    data_hash = (data_path / 'dataset.md5').read_text().strip()
 
-    # Determine the mean and standard deviation from the
-    targets = [x[1] for x in train_data]
-    label_mean = float(np.mean(targets))
-    label_stddev = float(np.std(targets))
-    scaler = MeanScaler(label_mean, var=label_stddev)
-
-    # Split validation data off of train data
-    train_data, valid_data = train_test_split(train_data, test_size=0.1)
+    #  Make a run directory
+    run_settings = args.__dict__.copy()
+    run_settings['train_counts'] = len(train_data)
+    run_settings['name'] = top_recipe.name
+    run_settings['level'] = top_recipe.level
+    run_settings['data_hash'] = data_hash
+    settings_hash = md5(json.dumps(args.__dict__).encode()).hexdigest()[-8:]
+    run_dir = Path(f'runs/model={args.model}-prop={args.target_property}_{args.target_method}-levels={len(all_recipes)}-hash={settings_hash}')
+    if (run_dir / 'test_results.csv').exists():
+        raise ValueError('Run already done')
+    run_dir.mkdir(exist_ok=True, parents=True)
+    (run_dir / 'params.json').write_text(json.dumps(run_settings))
 
     # sets the random seed for torch, numpy, python, etc.
     pl.seed_everything(args.seed)
 
-    # instantiate data module that orchestrates the splits and loading
-    dm = RedoxDataModule(
-        train_data=train_data,
-        valid_data=valid_data,
-        predict_data=test_data,
-        transforms=[scaler],
-        num_workers=args.num_loaders,
-        batch_size=args.batch_size,
-    )
-
-    # extract out the class reference from models
-    encoder = getattr(models, args.model)
-
-    # construct the task
-    model_kwargs = dict(
-        output_dim=1
-    )
-    if args.model_kwargs:
-        model_kwargs.update(args.model_kwargs)
-    task = RedoxTask(
-        encoder,
-        model_kwargs,
-        lr=args.learning_rate,
-        weight_decay=args.weight_decay,
-    )
-
-    # instantiate trainer, specifying how training is done
-    logger = CSVLogger('.')
-    trainer = pl.Trainer(max_epochs=args.epochs, fast_dev_run=args.fast_runs, accelerator='gpu', logger=logger, log_every_n_steps=1000)
-
-    # run the training loop
-    trainer.fit(task, datamodule=dm)
+    # Run training
+    scorer = RedoxModelsScorer()
+    train_inputs = scorer.transform_inputs(train_data)
+    train_outputs = scorer.transform_outputs(train_data, top_recipe)
+    lower_fidelities = None
+    if len(all_recipes) > 1:
+        lower_fidelities = collect_outputs(train_data, all_recipes[:-1])
+    del train_data
+    model_msg = scorer.retrain((args.model, args.model_kwargs), train_inputs, train_outputs,
+                               max_epochs=args.epochs, batch_size=args.batch_size,
+                               num_workers=args.num_loaders,
+                               lower_fidelities=lower_fidelities,
+                               verbose=True)
 
     # Run the prediction tasks
-    pred_y = trainer.predict(task, datamodule=dm)
-    pred_y = scaler.inverse_transform(torch.concat(pred_y))
-    pred_y = np.squeeze(pred_y.detach().cpu().numpy())
+    test_data = [record for record in test_data if top_recipe.level in record.properties[top_recipe.name]]
+    test_inputs = scorer.transform_inputs(test_data)
+    test_outputs = np.array([record.properties[top_recipe.name].pop(top_recipe.level) for record in test_data])
+    summary = {}
+    all_preds = {'smiles': [r.identifier.smiles for r in test_data],
+                 'true': test_outputs.squeeze()}
+    for level_id, recipe in enumerate(all_recipes[::-1]):
+        # Remove that level
+        for record in test_data:
+            record.properties[recipe.name].pop(recipe.level, None)
+        if len(all_recipes) > 1:
+            lower_fidelities = collect_outputs(test_data, all_recipes[:-1])
+        print(f'Running inference with ')
 
-    # Save run data to disk
-    true_y = [x[1] for x in test_data]
-    pd.DataFrame({'true': true_y, 'pred': pred_y}).to_csv(Path(logger.log_dir) / 'predictions.csv.gz', index=False)
+        # Create the inputs
+        test_preds = scorer.score(model_msg, test_inputs, lower_fidelities=lower_fidelities)
 
-    # Save the arguments
-    with open(Path(logger.log_dir) / 'params.json', 'w') as fp:
-        json.dump(args.__dict__, fp)
+        # Append the summary and score
+        level_tag = f'level_{len(all_recipes) - level_id - 1}'
+        summary.update(dict(
+            (f'{level_tag}_{f.__name__}', f(test_outputs, test_preds)) for f in
+            [metrics.mean_absolute_error, metrics.r2_score, metrics.mean_squared_error]
+        ))
+        all_preds[f'{level_tag}-pred'] = test_preds.squeeze()
+    # Save results
+    (run_dir / 'test_summary.json').write_text(json.dumps(summary, indent=2))
+    pd.DataFrame(all_preds).to_csv(run_dir / 'test_results.csv', index=False)
+
+    # Save results
+    (run_dir / 'test_summary.json').write_text(json.dumps(summary, indent=2))
+    pd.DataFrame(all_preds).to_csv(run_dir / 'test_results.csv', index=False)
