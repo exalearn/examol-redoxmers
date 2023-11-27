@@ -138,20 +138,31 @@ class RedoxModelsScorer(MultiFidelityScorer):
     def update(self, model: ModelObjectType, update_msg: bytes) -> ModelObjectType:
         return model[0], update_msg
 
-    def score(self, model_msg: bytes, inputs: list, lower_fidelities: np.ndarray | None = None, batch_size: int = 32) -> np.ndarray:
+    def score(self,
+              model_msg: bytes,
+              inputs: list,
+              lower_fidelities: np.ndarray | None = None,
+              batch_size: int = 32,
+              num_workers: int = 4,
+              device: str | None = None) -> np.ndarray:
         # Unpack the model
         model, transform = torch.load(BytesIO(model_msg), map_location='cpu')
+
+        # Move the model to the desired device
+        if device is None:
+            device = torch.device('cpu') if device is None else torch.device('cuda')
+        model.to(device)
 
         # Make the data loader
         with_targets = zip_longest(inputs, '', fillvalue=None)
         data_module = RedoxData(with_targets)
-        loader = PyGLoader(data_module)
+        loader = PyGLoader(data_module, batch_size=batch_size, num_workers=num_workers)
 
         # Run over all data
-        #  TODO (wardlt): Run on GPU
         with torch.no_grad():
             outputs = []
             for batch in loader:
+                batch = batch.to(device)
                 pred_y_unscaled = model(batch)
                 pred_y = transform.inverse_transform(pred_y_unscaled)
                 outputs.append(pred_y.detach().cpu().numpy())
