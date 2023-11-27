@@ -150,7 +150,7 @@ class RedoxModelsScorer(MultiFidelityScorer):
 
         # Move the model to the desired device
         if device is None:
-            device = torch.device('cpu') if device is None else torch.device('cuda')
+            device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
         model.to(device)
 
         # Make the data loader
