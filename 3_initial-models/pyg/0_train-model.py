@@ -160,7 +160,7 @@ if __name__ == "__main__":
     run_settings['data_hash'] = data_hash
     settings_hash = md5(json.dumps(args.__dict__).encode()).hexdigest()[-8:]
     run_dir = Path(f'runs/model={args.model}-prop={args.target_property}_{args.target_method}-levels={len(all_recipes)}-hash={settings_hash}')
-    if (run_dir / 'test_results.csv').exists():
+    if (run_dir / 'test_results.csv.gz').exists():
         raise ValueError('Run already done')
     run_dir.mkdir(exist_ok=True, parents=True)
     (run_dir / 'params.json').write_text(json.dumps(run_settings))
@@ -195,7 +195,7 @@ if __name__ == "__main__":
             record.properties[recipe.name].pop(recipe.level, None)
         if len(all_recipes) > 1:
             lower_fidelities = collect_outputs(test_data, all_recipes[:-1])
-        print(f'Running inference with ')
+            print(f'Running inference with {np.isfinite(lower_fidelities).sum()} known values')
 
         # Create the inputs
         test_preds = scorer.score(model_msg, test_inputs, lower_fidelities=lower_fidelities)
@@ -207,10 +207,7 @@ if __name__ == "__main__":
             [metrics.mean_absolute_error, metrics.r2_score, metrics.mean_squared_error]
         ))
         all_preds[f'{level_tag}-pred'] = test_preds.squeeze()
-    # Save results
-    (run_dir / 'test_summary.json').write_text(json.dumps(summary, indent=2))
-    pd.DataFrame(all_preds).to_csv(run_dir / 'test_results.csv', index=False)
 
     # Save results
     (run_dir / 'test_summary.json').write_text(json.dumps(summary, indent=2))
-    pd.DataFrame(all_preds).to_csv(run_dir / 'test_results.csv', index=False)
+    pd.DataFrame(all_preds).to_csv(run_dir / 'test_results.csv.gz', index=False)
