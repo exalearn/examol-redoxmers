@@ -1,12 +1,9 @@
 """Compute an initial dataset for various recipes"""
 from argparse import ArgumentParser, Namespace
 from collections import defaultdict
-from threading import Event
 from queue import LifoQueue
 from platform import node
 from pathlib import Path
-from shutil import move
-from time import sleep
 import logging
 import gzip
 import sys
@@ -15,12 +12,12 @@ import numpy as np
 from rdkit import RDLogger
 from proxystore.connectors.redis import RedisConnector
 from proxystore.store import Store, register_store
-from colmena.thinker import BaseThinker, ResourceCounter, event_responder, task_submitter, result_processor
+from colmena.thinker import BaseThinker, ResourceCounter, task_submitter, result_processor
 from colmena.task_server.parsl import ParslTaskServer
 from colmena.queue import PipeQueues
 from colmena.models import Result
 
-from examol.store.models import MoleculeRecord
+from examol.store.db.memory import InMemoryStore
 from examol.store.recipes import RedoxEnergy, SolvationEnergy
 
 import configs
@@ -38,7 +35,6 @@ class BruteForceThinker(BaseThinker):
         slots: Number of molecules to run concurrently
         database: All known information about each molecule
         recipes: List of recipes to be computed
-        database_path: Path in which to store the database
         optimization_path: Path in which to store optimization steps
     """
 
@@ -46,20 +42,19 @@ class BruteForceThinker(BaseThinker):
                  queues: PipeQueues,
                  args: Namespace,
                  slots: int,
-                 database: dict[str, MoleculeRecord],
+                 molecules: list[str],
+                 database: InMemoryStore,
                  recipes: list[RedoxEnergy],
-                 database_path: Path,
                  optimization_path: Path | None):
         super().__init__(queues, ResourceCounter(slots))
         self.optimization_path = optimization_path
-        self.database_path = database_path
         self.database = database
         self.recipes = recipes
         self.args = args
 
         # Determine where to store the task records
-        run_name = self.database_path.name[:-8]
-        self.record_path = self.database_path.parent / f'{run_name}-results.json.gz'
+        run_name = self.database.path.name[:-8]
+        self.record_path = self.database.path.parent / f'{run_name}-results.json.gz'
 
         # Output handles
         self.record_fp = gzip.open(self.record_path, 'at')
@@ -70,16 +65,12 @@ class BruteForceThinker(BaseThinker):
         # State tracking
         self.molecule_queue: LifoQueue[str] = LifoQueue()  # List of molecules which are yet to be computed
         self.ongoing_tasks: dict[str, int] = defaultdict(int)  # How many tasks ongoing for each molecule
-        self.checkpoint = Event()  # Triggers writing the database to disk
         self.failures: set[str] = set()  # Molecules which have had one failure and we should not re-add to queue
         self.success_count = 0
 
-        # Populate the list of molecules to run
-        rng = np.random.default_rng(seed=1)
-        all_keys = list(self.database.keys())
-        rng.shuffle(all_keys)
-        for key, _ in zip(all_keys, range(len(self.database) if args.num_to_run is None else args.num_to_run)):
-            self.molecule_queue.put(key)
+        # Push the molecules into the queue
+        for mol in molecules:
+            self.molecule_queue.put(mol)
 
     @task_submitter()
     def submit_task(self):
@@ -89,7 +80,7 @@ class BruteForceThinker(BaseThinker):
         while not self.molecule_queue.empty():
             # Get the next record
             key = self.molecule_queue.get()
-            my_record = self.database[key]
+            my_record = self.database.get_or_make_record(key)
 
             # See if there is any new work to do
             for recipe in self.recipes:
@@ -153,30 +144,18 @@ class BruteForceThinker(BaseThinker):
                 sim_result, metadata = result.value
                 my_record.add_energies(sim_result)
 
-            # Trigger the engine to checkpoint our database
-            self.checkpoint.set()
+        # Trigger an update to the database
+        self.database.update_record(my_record)
 
-        # Check if we need more work for this molecule if there was at least one succes
+        # Check if we need more work for this molecule if there was at least one success
         self.logger.debug(f'Stored record for {my_record.key}. {self.ongoing_tasks[my_record.key]} tasks remaining')
         if self.ongoing_tasks[my_record.key] == 0:
             # Only re-submit molecule if there were no failures
             if my_record.key not in self.failures:
-                self.molecule_queue.put(my_record.key)
+                self.molecule_queue.put(my_record.identifier.smiles)
             self.ongoing_tasks.pop(my_record.key)  # Mark that this molecule is done
             self.rec.release()  # Let the next molecule start
             self.success_count += 1
-
-    @event_responder(event_name='checkpoint')
-    def write_database(self):
-        """Save the database to disk"""
-
-        # Pause for the user-specified amount of time
-        sleep(self.args.write_frequency)
-        temp_path = self.database_path.parent / f'{self.database_path.name}.new'
-        with gzip.open(temp_path, 'wt') as fp:
-            for record in dataset.values():
-                print(record.to_json(), file=fp)
-        move(temp_path, self.database_path)
 
 
 if __name__ == "__main__":
@@ -204,32 +183,17 @@ if __name__ == "__main__":
         molecules = [line.strip() for line in fp]
     my_logger.info(f'Loaded {len(molecules)} molecules to screen')
 
+    # Downselect to a certain number of molecules
+    rng = np.random.default_rng(seed=1)
+    rng.shuffle(molecules)
+    if args.num_to_run is not None:
+        molecules = molecules[:args.num_to_run]
+        my_logger.info(f'Down selected to {len(molecules)} molecules')
+
     # Get the path to the dataset
     dataset_path = Path('datasets') / f'{search_path.name[:-4]}.json.gz'
     records_path = dataset_path.parent / f'{search_path.name[:-4]}-simulation-records.json.gz'
-    dataset_path.parent.mkdir(exist_ok=True)
-    dataset = {}
-
-    # Make the database
-    if dataset_path.is_file():
-        # Load the existing data
-        my_logger.info(f'Loading initial data from {dataset_path}')
-        with gzip.open(dataset_path, 'rt') as fp:
-            for line in fp:
-                record = MoleculeRecord.from_json(line)
-                dataset[record.key] = record
-
-        assert len(dataset) == len(molecules), f'There was a corrupted save. Dataset has {len(dataset)} records, expected {len(molecules)}'
-    else:
-        my_logger.info(f'Creating an initial dataset at {dataset_path}')
-        # Ensure each molecule in the search space is in this database
-        with gzip.open(dataset_path, 'wt') as fp:
-            for smiles in molecules:
-                record = MoleculeRecord.from_identifier(smiles)
-                if record.key not in dataset:
-                    dataset[record.key] = record
-                print(record.to_json(), file=fp)
-    my_logger.info(f'Starting from a dataset of {len(dataset)} records')
+    dataset = InMemoryStore(dataset_path, args.write_frequency)
 
     # Get the right computational environment
     config_fn = getattr(configs, args.config_function)
@@ -251,23 +215,24 @@ if __name__ == "__main__":
     my_logger.info(f'Assembled a list of {len(recipes)} recipes to compute')
 
     # Create the queues which will connect task server and thinker
-    store = Store(name='redis', connector=RedisConnector(hostname=node(), port=7485, clear=True), metrics=True)
+    store = Store(name='redis', connector=RedisConnector(hostname='localhost', port=6379, clear=True), metrics=True)
     register_store(store)
-    queues = PipeQueues(proxystore_name='redis', proxystore_threshold=10000)  # Store anything large than 10kB in redis
+    queues = PipeQueues(proxystore_name='redis', proxystore_threshold=10000)  # Store anything larger than 10kB in redis
 
     # Create the task server
     task_server = ParslTaskServer(queues=queues, methods=[sim.compute_energy, sim.optimize_structure], config=config)
     my_logger.info('Created task server')
 
     # Create the thinker
-    thinker = BruteForceThinker(queues, args, n_slots, dataset, recipes, dataset_path, records_path)
+    thinker = BruteForceThinker(queues, args, n_slots, molecules, dataset, recipes, records_path)
     thinker.logger.addHandler(handler)
     thinker.logger.setLevel(logging.INFO)
 
     # Run the script
     try:
-        task_server.start()
-        thinker.run()
+        with dataset:
+            task_server.start()
+            thinker.run()
     finally:
         my_logger.info(f'Closing logs')
         thinker.record_fp.close()
@@ -277,15 +242,7 @@ if __name__ == "__main__":
     task_server.join()
 
     # Print whether we completed many molecules
-    my_logger.info(f'Added {thinker.success_count} completed molecules.')
-
-    # Save the result one last time
-    temp_path = dataset_path.parent / f'{dataset_path.name}.new'
-    with gzip.open(temp_path, 'wt') as fp:
-        for record in dataset.values():
-            print(record.to_json(), file=fp)
-    move(temp_path, dataset_path)
-    my_logger.info(f'Wrote database to {dataset_path}')
+    my_logger.info(f'Added {thinker.success_count} new computations.')
 
     # Close the proxystore
     store.close()
