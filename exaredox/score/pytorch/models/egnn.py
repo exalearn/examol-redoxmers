@@ -6,10 +6,9 @@ from einops import reduce
 from torch import nn
 from torch_geometric.nn import LayerNorm
 from torch_geometric.nn import MessagePassing
-from torch_geometric.nn import pool
+
 from torch_geometric.typing import Size
 
-from ..data import Molecule
 from .base import CoordinateNormalization, EncoderWithCoords
 from .utils import make_mlp
 
@@ -160,22 +159,20 @@ class EGNN(EncoderWithCoords):
         pool_operation: Name of the pool operation to use (ex: "add" for "global_add_pool")
         num_output_layers: Number of output layers
         pool_before_output: Whether to pool before or after applying the output layers
+        mlp_per_output: Train a single MLP which maps network or node features for each output
+            instead of a single, multi-output MLP
     """
 
     def __init__(
             self,
             hidden_dim: int = 64,
-            output_dim: int = 1,
             num_conv: int = 3,
             num_atom_types: int = 100,
             num_edge_types: int = 30,
             activation: str = "SiLU",
-            pool_operation: str = 'add',
-            num_output_layers: int = 0,
-            pool_before_output: bool = True,
             **kwargs,
     ) -> None:
-        super().__init__()
+        super().__init__(hidden_dim=hidden_dim, **kwargs)
         self.atom_embedding = nn.Embedding(num_atom_types, hidden_dim, padding_idx=0)
         self.edge_embedding = nn.Embedding(num_edge_types, hidden_dim, padding_idx=0)
         # embeds coordinates as part of EGNN
@@ -197,35 +194,3 @@ class EGNN(EncoderWithCoords):
                 for _ in range(num_conv)
             ],
         )
-
-        # Settings that morph atom-level features into
-        self.pool_operation = getattr(pool, f'global_{pool_operation}_pool')
-        self.pool_before_output = pool_before_output
-        self.output_mlp = None
-        if num_output_layers > 0:
-            self.output_mlp = make_mlp(hidden_dim, hidden_dim, output_dim, activation="ReLU", num_layers=num_output_layers)
-        else:
-            self.output_mlp = nn.Linear(hidden_dim, output_dim, bias=False)
-
-    def _forward(self, batch: Molecule) -> torch.Tensor:
-        super()._forward(batch)
-        atoms = batch.atoms
-        bonds = batch.bonds
-        edge_index = batch.edge_index
-        node_batch_idx = getattr(batch, "batch", None)
-        coords = batch.coords
-        # embed coordinates, then lookup embeddings for atoms and bonds
-        coords = self.coord_embedding(coords)
-        atom_feats = self.atom_embedding(atoms)
-        edge_feats = self.edge_embedding(bonds)
-        # loop over each graph layer
-        for layer in self.conv_layers:
-            atom_feats, coords = layer(atom_feats, coords, edge_feats, edge_index)
-
-        # Condense from atom features to one output per graph
-        if self.pool_before_output:
-            pooled_data = self.pool_operation(atom_feats, node_batch_idx)
-            return self.output_mlp(pooled_data)
-        else:
-            output_per_node = self.output_mlp(atom_feats)
-            return self.pool_operation(output_per_node, node_batch_idx)

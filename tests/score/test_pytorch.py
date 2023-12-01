@@ -57,8 +57,10 @@ def test_convert(training_set, scorer):
 @mark.parametrize('pool_before', [True, False])
 @mark.parametrize('output_layers', [0, 2])
 @mark.parametrize('pool_operation', ['add', 'mean'])
-def test_egnn(pool_before, pool_operation, output_layers, scorer, training_set, recipe):
-    model_kwargs = dict(hidden_dim=32, pool_operation=pool_operation, pool_before_output=pool_before, num_output_layers=output_layers)
+@mark.parametrize('per_property', [True, False])
+def test_egnn(pool_before, pool_operation, output_layers, scorer, training_set, recipe, per_property):
+    model_kwargs = dict(hidden_dim=32, pool_operation=pool_operation, pool_before_output=pool_before,
+                        num_output_layers=output_layers, output_mlp_per_property=per_property)
 
     # Prepare messages
     model_msg = scorer.prepare_message((('EGNN', model_kwargs), None), training=True)
