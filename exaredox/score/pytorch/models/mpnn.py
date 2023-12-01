@@ -75,7 +75,7 @@ class MPNN(EncoderNoCoords):
             num_conv: int = 3,
             num_atom_types: int = 100,
             num_edge_types: int = 30,
-            norm: bool = False,
+            norm: bool = True,
             **kwargs
     ) -> None:
         super().__init__(hidden_dim=hidden_dim, **kwargs)
