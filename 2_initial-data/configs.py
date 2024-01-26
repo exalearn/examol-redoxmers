@@ -91,8 +91,8 @@ def make_polaris_config() -> tuple[Config, ASESimulator, int, list[str]]:
 
     # Settings
     max_blocks = 8
-    nodes_per_cp2k = 1
-    cp2k_per_block = 4
+    nodes_per_cp2k = 2
+    cp2k_per_block = 1
     prefetch = 0
     nodes_per_block = cp2k_per_block * nodes_per_cp2k
 
@@ -105,7 +105,7 @@ def make_polaris_config() -> tuple[Config, ASESimulator, int, list[str]]:
                 address=address_by_interface('bond0'),
                 prefetch_capacity=prefetch,
                 provider=PBSProProvider(
-                account="CSC249ADCD08",
+                account="ExaMol",
                     worker_init=f"""
 module reset
 module swap PrgEnv-nvhpc PrgEnv-gnu
@@ -123,7 +123,7 @@ split --lines={nodes_per_cp2k} -d --suffix-length=2 $PBS_NODEFILE /tmp/hostfiles
 ls /tmp/hostfiles
 
 # Load anaconda
-conda activate /lus/grand/projects/CSC249ADCD08/ExaMol/env-polaris
+conda activate /lus/grand/projects/CSC249ADCD08/examol-redoxmers/env-polaris
 which python""",
                     walltime="72:00:00",
                     queue="preemptable",
@@ -147,7 +147,7 @@ which python""",
                      '/lus/grand/projects/CSC249ADCD08/cp2k/set_affinity_gpu_polaris.sh '
                      '/lus/grand/projects/CSC249ADCD08/cp2k/cp2k-git/exe/local_cuda/cp2k_shell.psmp',
     )
-    return config, sim, max_blocks * cp2k_per_block * (prefetch + 1), ['cp2k_b3lyp_svp', 'cp2k_b3lyp_tzvpd', 'cp2k_wb97x-d3_tzvpd']
+    return config, sim, max_blocks * cp2k_per_block * (prefetch + 1), ['cp2k_b3lyp_svp', 'cp2k_b3lyp_tzvpd', 'cp2k_wb97x_d3_tzvpd']
 
 
 def make_polaris_debug_config() -> tuple[Config, ASESimulator, int, list[str]]:
@@ -186,7 +186,7 @@ split --lines={nodes_per_cp2k} -d --suffix-length=2 $PBS_NODEFILE /tmp/hostfiles
 ls /tmp/hostfiles
 
 # Load anaconda
-conda activate /lus/grand/projects/CSC249ADCD08/ExaMol/env-polaris
+conda activate /lus/grand/projects/CSC249ADCD08/examol-redoxmers/env-polaris
 which python""",
                     walltime="1:00:00",
                     queue="debug",
@@ -203,7 +203,8 @@ which python""",
     )
     sim = ASESimulator(
         scratch_dir='cp2k-files',
-        cp2k_command=f'mpiexec -n {nodes_per_cp2k * 4} --ppn 4 --cpu-bind depth --depth 8 -env OMP_NUM_THREADS=8 '
+        cp2k_command='export TMPDIR=/tmp/pmi-$PARSL_WORKER_RANK-$RANDOM/; mkdir -p $TMPDIR;'
+                     f'mpiexec -n {nodes_per_cp2k * 4} --ppn 4 --cpu-bind depth --depth 8 -env OMP_NUM_THREADS=8 '
                      f'--hostfile /tmp/hostfiles/local_hostfile.`printf %02d $PARSL_WORKER_RANK` '
                      '/lus/grand/projects/CSC249ADCD08/cp2k/set_affinity_gpu_polaris.sh '
                      '/lus/grand/projects/CSC249ADCD08/cp2k/cp2k-git/exe/local_cuda/cp2k_shell.psmp',
