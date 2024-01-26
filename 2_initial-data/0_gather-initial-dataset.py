@@ -87,7 +87,7 @@ class BruteForceThinker(BaseThinker):
                 try:
                     next_calculations = recipe.suggest_computations(my_record)
                     if len(next_calculations) > 0:
-                        self.logger.debug(f'Submitting tasks for {my_record.key} recipe {recipe.name}@{recipe.level}')
+                        self.logger.info(f'Submitting tasks for {my_record.key} recipe {recipe.name}@{recipe.level}')
                         # Submit them
                         for request in next_calculations:
                             method = 'optimize_structure' if request.optimize else 'compute_energy'
@@ -148,7 +148,7 @@ class BruteForceThinker(BaseThinker):
         self.database.update_record(my_record)
 
         # Check if we need more work for this molecule if there was at least one success
-        self.logger.debug(f'Stored record for {my_record.key}. {self.ongoing_tasks[my_record.key]} tasks remaining')
+        self.logger.info(f'Stored record for {my_record.key}. {self.ongoing_tasks[my_record.key]} tasks remaining')
         if self.ongoing_tasks[my_record.key] == 0:
             # Only re-submit molecule if there were no failures
             if my_record.key not in self.failures:
@@ -170,11 +170,12 @@ if __name__ == "__main__":
 
     # Make a logger
     my_logger = logging.getLogger('main')
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
-    for logger in [logging.getLogger('examol'), my_logger]:
-        logger.addHandler(handler)
-        logger.setLevel(logging.INFO)
+    handlers = [logging.StreamHandler(sys.stdout), logging.FileHandler('runtime.log', 'a')]
+    for handler in handlers:
+        handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+        for logger in [logging.getLogger('examol'), my_logger]:
+            logger.addHandler(handler)
+            logger.setLevel(logging.INFO)
 
     # Load in the molecules
     search_path = Path(args.search_space)
@@ -204,10 +205,10 @@ if __name__ == "__main__":
     recipes = []
     solvents = ['acn']
     for energy_level in energy_configs:
-        for charge in [-1, 1]:
+        for charge in [-1]:
             for solvent in [None] + solvents:
                 recipes.extend([
-                    RedoxEnergy(energy_config=energy_level, vertical=True, charge=charge, solvent=solvent),
+   #                 RedoxEnergy(energy_config=energy_level, vertical=True, charge=charge, solvent=solvent),
                     RedoxEnergy(energy_config=energy_level, vertical=False, charge=charge, solvent=solvent),
                 ])
         for solvent in solvents:
@@ -215,9 +216,7 @@ if __name__ == "__main__":
     my_logger.info(f'Assembled a list of {len(recipes)} recipes to compute')
 
     # Create the queues which will connect task server and thinker
-    store = Store(name='redis', connector=RedisConnector(hostname='localhost', port=6379, clear=True), metrics=True)
-    register_store(store)
-    queues = PipeQueues(proxystore_name='redis', proxystore_threshold=10000)  # Store anything larger than 10kB in redis
+    queues = PipeQueues()
 
     # Create the task server
     task_server = ParslTaskServer(queues=queues, methods=[sim.compute_energy, sim.optimize_structure], config=config)
@@ -225,7 +224,8 @@ if __name__ == "__main__":
 
     # Create the thinker
     thinker = BruteForceThinker(queues, args, n_slots, molecules, dataset, recipes, records_path)
-    thinker.logger.addHandler(handler)
+    for handler in handlers:
+        thinker.logger.addHandler(handler)
     thinker.logger.setLevel(logging.INFO)
 
     # Run the script
